@@ -1,19 +1,25 @@
+
 #include <WiFi.h>
 #include <DHT.h>
 #include <Wire.h>
 #include <HTTPClient.h>
 #include <LiquidCrystal_I2C.h> 
 
-const char* ssid = "your_wifi_ssid";
-const char* password = "your_wifi_password";
+const char* ssid = "Vianet promotion MI -1";
+const char* password = "Vianet@123";
 const char* serverName = "http://<Flask_Server_IP>/sensor_data";  
 
+#define ULTRASONIC_TRIG_PIN 19 
+#define ULTRASONIC_ECHO_PIN 21 
+
 DHT dht(4, DHT11);  
-int ldrPin = 34;    
 
 #define MQ2_SENSOR_PIN 34  
+#define PIR_SENSOR_PIN 2 
+#define LED_PIN 32   
 
 int gasThreshold = 35;  
+int waterLevelThreshold = 10;  // Add a threshold for water level (in cm)
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
@@ -22,8 +28,12 @@ void setup() {
   WiFi.begin(ssid, password);
   dht.begin();
 
-  lcd.begin();
+  lcd.begin(16,2);
   lcd.backlight(); 
+
+  pinMode(PIR_SENSOR_PIN, INPUT);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW); 
 
   while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
@@ -34,40 +44,33 @@ void setup() {
 }
 
 void loop() {
-  int ldrValue = analogRead(ldrPin);  // Read the LDR value
-
-  // Read temperature and humidity
   float temperature = dht.readTemperature();
   float humidity = dht.readHumidity();
 
-  // Read smoke (gas) level from MQ2 sensor
-  int gasValue = analogRead(MQ2_SENSOR_PIN);  // Reading from the gas sensor pin
+  int gasValue = analogRead(MQ2_SENSOR_PIN); 
 
-  // Check for gas and high temperature
-  if (gasValue > gasThreshold || temperature > 30) {  // Assuming gas value above threshold or temperature over 30°C triggers an alert
+  if (gasValue > gasThreshold || temperature > 30) { 
     sendAlert(gasValue, temperature);
   }
 
-  // Display temperature and humidity on the LCD
   lcd.clear();
-  lcd.setCursor(0, 0);  // Set cursor to the first line
+  lcd.setCursor(0, 0); 
   lcd.print("Temp: ");
   lcd.print(temperature);
   lcd.print(" C");
 
-  lcd.setCursor(0, 1);  // Set cursor to the second line
+  lcd.setCursor(0, 1);  
   lcd.print("Humidity: ");
   lcd.print(humidity);
   lcd.print(" %");
 
-  // Send data to Flask server
   if(WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
     http.begin(serverName);
 
     http.addHeader("Content-Type", "application/x-www-form-urlencoded");
 
-    String httpRequestData = "ldr=" + String(ldrValue) + "&temperature=" + String(temperature) + "&humidity=" + String(humidity);
+    String httpRequestData = "temperature=" + String(temperature) + "&humidity=" + String(humidity);
     int httpResponseCode = http.POST(httpRequestData);
 
     if(httpResponseCode > 0) {
@@ -79,26 +82,31 @@ void loop() {
     http.end();
   }
 
-  delay(10000);  // Delay between readings (10 seconds)
+  int motionDetected = digitalRead(PIR_SENSOR_PIN);
+  if (motionDetected == HIGH) {
+    digitalWrite(LED_PIN, HIGH); 
+    Serial.println("Motion detected: LED ON");
+  } else {
+    digitalWrite(LED_PIN, LOW); 
+    Serial.println("No motion: LED OFF");
+  }
+
+  delay(10000); 
 }
 
 void sendAlert(int gasLevel, float temp) {
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
     String alertMessage = "Alert! ";
-
-    // Check for gas alert
     if (gasLevel > gasThreshold) {
       alertMessage += "Gas leak detected. ";
     }
 
-    // Check for temperature alert
     if (temp > 30) {
       alertMessage += "High temperature detected. ";
     }
 
-    // Send the alert message via a POST request
-    String serverAlertURL = "http://<Flask_Server_IP>/alert";  // Replace with your Flask server's alert endpoint
+    String serverAlertURL = "http://<Flask_Server_IP>/alert"; 
     http.begin(serverAlertURL);
 
     http.addHeader("Content-Type", "application/x-www-form-urlencoded");
@@ -110,6 +118,47 @@ void sendAlert(int gasLevel, float temp) {
       Serial.println("Alert sent successfully");
     } else {
       Serial.println("Error sending alert");
+    }
+
+    http.end();
+  }
+}
+
+void checkWaterLevel() {
+  long duration, distance;
+
+  digitalWrite(ULTRASONIC_TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(ULTRASONIC_TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(ULTRASONIC_TRIG_PIN, LOW);
+
+  duration = pulseIn(ULTRASONIC_ECHO_PIN, HIGH);
+
+  distance = (duration / 2) / 29.1;
+
+  if (distance <= waterLevelThreshold) {
+    sendWaterAlert();
+  }
+}
+
+void sendWaterAlert() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String alertMessage = "Alert! Water level detected in the tank.";
+
+    String serverAlertURL = "http://<Flask_Server_IP>/alert"; 
+    http.begin(serverAlertURL);
+
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+
+    String httpRequestData = "alert=" + alertMessage;
+    int httpResponseCode = http.POST(httpRequestData);
+
+    if (httpResponseCode > 0) {
+      Serial.println("Water alert sent successfully");
+    } else {
+      Serial.println("Error sending water alert");
     }
 
     http.end();
