@@ -1,126 +1,158 @@
-
 #include <WiFi.h>
 #include <DHT.h>
 #include <Wire.h>
 #include <HTTPClient.h>
-#include <LiquidCrystal_I2C.h> 
+#include <LiquidCrystal_I2C.h>
 
-const char* ssid = "Vianet promotion MI -1";
-const char* password = "Vianet@123";
-const char* serverName = "http://<Flask_Server_IP>/sensor_data";  
 
-#define ULTRASONIC_TRIG_PIN 19 
-#define ULTRASONIC_ECHO_PIN 21 
+const char* ssid = "titan";
+const char* password = "teamtitan";
 
-DHT dht(4, DHT11);  
+const char* commandServer = "http://192.168.1.100:5000/get_command";
+const char* sensorDataServer = "http://192.168.1.100:5000/sensor_data";
 
-#define MQ2_SENSOR_PIN 34  
-#define PIR_SENSOR_PIN 2 
-#define LED_PIN 32   
+#define ULTRASONIC_TRIG_PIN 19
+#define ULTRASONIC_ECHO_PIN 21
+#define MQ2_SENSOR_PIN 34
+#define PIR_SENSOR_PIN 2
+#define LED_PIN 32
+#define DHT_PIN 4
+#define LIGHT_PIN 23
 
-int gasThreshold = 35;  
-int waterLevelThreshold = 10;  // Add a threshold for water level (in cm)
+int gasThreshold = 35;
+
+DHT dht(DHT_PIN, DHT11);
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 void setup() {
   Serial.begin(115200);
-  WiFi.begin(ssid, password);
-  dht.begin();
-
-  lcd.begin(16,2);
-  lcd.backlight(); 
-
+  pinMode(LIGHT_PIN, OUTPUT);
   pinMode(PIR_SENSOR_PIN, INPUT);
   pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW); 
+  pinMode(ULTRASONIC_TRIG_PIN, OUTPUT);
+  pinMode(ULTRASONIC_ECHO_PIN, INPUT);
 
+  digitalWrite(LIGHT_PIN, LOW); 
+  digitalWrite(LED_PIN, LOW);
+
+  dht.begin();
+  lcd.begin(16, 2);
+  lcd.backlight();
+
+  WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
     Serial.println("Connecting to WiFi...");
   }
-
   Serial.println("Connected to WiFi");
 }
 
 void loop() {
+  if (WiFi.status() == WL_CONNECTED) {
+    fetchCommand();
+    sendSensorData();
+    checkMotion();
+    checkWaterLevel();
+    fetchCommand();
+  } else {
+    Serial.println("WiFi disconnected. Reconnecting...");
+    WiFi.reconnect();
+  }
+
+  displaySensorData();
+  delay(10000); // Main loop delay
+}
+
+void fetchCommand() {
+  HTTPClient http;
+  http.begin(commandServer);
+  int httpResponseCode = http.GET();
+
+  if (httpResponseCode > 0) {
+    String command = http.getString();
+    command.trim();
+    Serial.println("Received command: " + command);
+    handleCommand(command);
+  } else {
+    Serial.println("Error fetching command");
+  }
+
+  http.end();
+}
+
+void handleCommand(String command) {
+  command.toLowerCase();
+  if (command == "turn on the light") {
+    digitalWrite(LIGHT_PIN, HIGH);
+    Serial.println("Light turned ON");
+  } else if (command == "turn off the light") {
+    digitalWrite(LIGHT_PIN, LOW);
+    Serial.println("Light turned OFF");
+  } else {
+    Serial.println("Unknown command");
+  }
+}
+
+void sendSensorData() {
   float temperature = dht.readTemperature();
   float humidity = dht.readHumidity();
+  int gasValue = analogRead(MQ2_SENSOR_PIN);
 
-  int gasValue = analogRead(MQ2_SENSOR_PIN); 
-
-  if (gasValue > gasThreshold || temperature > 30) { 
+  if (gasValue > gasThreshold || temperature > 30) {
     sendAlert(gasValue, temperature);
   }
 
-  lcd.clear();
-  lcd.setCursor(0, 0); 
-  lcd.print("Temp: ");
-  lcd.print(temperature);
-  lcd.print(" C");
+  HTTPClient http;
+  http.begin(sensorDataServer);
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
 
-  lcd.setCursor(0, 1);  
-  lcd.print("Humidity: ");
-  lcd.print(humidity);
-  lcd.print(" %");
+  String httpRequestData = "temperature=" + String(temperature) + "&humidity=" + String(humidity);
+  int httpResponseCode = http.POST(httpRequestData);
 
-  if(WiFi.status() == WL_CONNECTED) {
-    HTTPClient http;
-    http.begin(serverName);
-
-    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-
-    String httpRequestData = "temperature=" + String(temperature) + "&humidity=" + String(humidity);
-    int httpResponseCode = http.POST(httpRequestData);
-
-    if(httpResponseCode > 0) {
-      Serial.println("Data Sent Successfully");
-    } else {
-      Serial.println("Error sending data");
-    }
-
-    http.end();
-  }
-
-  int motionDetected = digitalRead(PIR_SENSOR_PIN);
-  if (motionDetected == HIGH) {
-    digitalWrite(LED_PIN, HIGH); 
-    Serial.println("Motion detected: LED ON");
+  if (httpResponseCode > 0) {
+    Serial.println("Sensor data sent successfully");
   } else {
-    digitalWrite(LED_PIN, LOW); 
-    Serial.println("No motion: LED OFF");
+    Serial.println("Error sending sensor data");
   }
 
-  delay(10000); 
+  http.end();
 }
 
 void sendAlert(int gasLevel, float temp) {
-  if (WiFi.status() == WL_CONNECTED) {
-    HTTPClient http;
-    String alertMessage = "Alert! ";
-    if (gasLevel > gasThreshold) {
-      alertMessage += "Gas leak detected. ";
-    }
+  HTTPClient http;
+  String alertMessage = "Alert! ";
 
-    if (temp > 30) {
-      alertMessage += "High temperature detected. ";
-    }
+  if (gasLevel > gasThreshold) {
+    alertMessage += "Gas leak detected. ";
+  }
+  if (temp > 30) {
+    alertMessage += "High temperature detected. ";
+  }
 
-    String serverAlertURL = "http://<Flask_Server_IP>/alert"; 
-    http.begin(serverAlertURL);
+  http.begin(alertServer);
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
 
-    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  String httpRequestData = "alert=" + alertMessage;
+  int httpResponseCode = http.POST(httpRequestData);
 
-    String httpRequestData = "alert=" + alertMessage;
-    int httpResponseCode = http.POST(httpRequestData);
+  if (httpResponseCode > 0) {
+    Serial.println("Alert sent successfully");
+  } else {
+    Serial.println("Error sending alert");
+  }
 
-    if (httpResponseCode > 0) {
-      Serial.println("Alert sent successfully");
-    } else {
-      Serial.println("Error sending alert");
-    }
+  http.end();
+}
 
-    http.end();
+void checkMotion() {
+  int motionDetected = digitalRead(PIR_SENSOR_PIN);
+  if (motionDetected == HIGH) {
+    digitalWrite(LED_PIN, HIGH);
+    Serial.println("Motion detected: LED ON");
+  } else {
+    digitalWrite(LED_PIN, LOW);
+    Serial.println("No motion: LED OFF");
   }
 }
 
@@ -134,7 +166,6 @@ void checkWaterLevel() {
   digitalWrite(ULTRASONIC_TRIG_PIN, LOW);
 
   duration = pulseIn(ULTRASONIC_ECHO_PIN, HIGH);
-
   distance = (duration / 2) / 29.1;
 
   if (distance <= waterLevelThreshold) {
@@ -143,24 +174,36 @@ void checkWaterLevel() {
 }
 
 void sendWaterAlert() {
-  if (WiFi.status() == WL_CONNECTED) {
-    HTTPClient http;
-    String alertMessage = "Alert! Water level detected in the tank.";
+  HTTPClient http;
+  String alertMessage = "Alert! Water level detected in the tank.";
 
-    String serverAlertURL = "http://<Flask_Server_IP>/alert"; 
-    http.begin(serverAlertURL);
+  http.begin(alertServer);
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
 
-    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  String httpRequestData = "alert=" + alertMessage;
+  int httpResponseCode = http.POST(httpRequestData);
 
-    String httpRequestData = "alert=" + alertMessage;
-    int httpResponseCode = http.POST(httpRequestData);
-
-    if (httpResponseCode > 0) {
-      Serial.println("Water alert sent successfully");
-    } else {
-      Serial.println("Error sending water alert");
-    }
-
-    http.end();
+  if (httpResponseCode > 0) {
+    Serial.println("Water alert sent successfully");
+  } else {
+    Serial.println("Error sending water alert");
   }
+
+  http.end();
+}
+
+void displaySensorData() {
+  float temperature = dht.readTemperature();
+  float humidity = dht.readHumidity();
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Temp: ");
+  lcd.print(temperature);
+  lcd.print(" C");
+
+  lcd.setCursor(0, 1);
+  lcd.print("Humidity: ");
+  lcd.print(humidity);
+  lcd.print(" %");
 }
